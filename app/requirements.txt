@@ -5,3 +5,16 @@ sqlalchemy
 apscheduler
 python-dotenv
 pydantic
+fastapi
+uvicorn[standard]
+httpx
+sqlalchemy
+apscheduler
+python-dotenv
+pydantic
+fastapi
+uvicorn
+python-multipart
+Flask
+flask-cors
+httpx>=0.24.0
