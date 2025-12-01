@@ -2,15 +2,12 @@
 from fastapi import APIRouter, HTTPException
 import httpx
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 router = APIRouter()
 
-OPENAQ_BASE = "https://api.openaq.org/v2/latest"
-# We will request country=IN and city=<city>
+OPENAQ_BASE = "https://api.openaq.org/v2"
 
-# CPCB/typical breakpoints for PM2.5 and PM10 (conc ranges -> AQI ranges)
-# Each entry: (C_low, C_high, I_low, I_high)
 PM25_BREAKPOINTS = [
     (0.0, 30.0, 0, 50),
     (30.0, 60.0, 51, 100),
@@ -20,7 +17,6 @@ PM25_BREAKPOINTS = [
     (250.0, 350.0, 401, 500),
     (350.0, 500.0, 501, 999),
 ]
-
 PM10_BREAKPOINTS = [
     (0.0, 50.0, 0, 50),
     (50.0, 100.0, 51, 100),
@@ -33,18 +29,10 @@ PM10_BREAKPOINTS = [
 
 
 def linear_interpolate(C: float, bp: Tuple[float, float, int, int]) -> Optional[float]:
-    """
-    Linear interpolation from concentration (C) into sub-index range using a breakpoint tuple.
-    Returns sub-index (float) or None if not applicable.
-    """
     C_low, C_high, I_low, I_high = bp
     if C is None:
         return None
     if C_low <= C <= C_high:
-        # careful arithmetic
-        # I = ((Ihigh - Ilow)/(Chigh - Clow)) * (C - Clow) + Ilow
-        numerator = (I_high := I_high if False else I_high)  # dummy to keep style below
-        # compute step by step to avoid accidental float mistakes
         span_C = (C_high - C_low)
         if span_C == 0:
             return float(I_low)
@@ -54,17 +42,12 @@ def linear_interpolate(C: float, bp: Tuple[float, float, int, int]) -> Optional[
     return None
 
 
-def get_subindex(conc: Optional[float], breakpoints: list) -> Optional[int]:
-    """
-    Given a concentration and breakpoint table, return the rounded sub-index (integer).
-    Returns None if conc is None or doesn't fit any breakpoint.
-    """
+def get_subindex(conc: Optional[float], breakpoints: List[Tuple[float, float, int, int]]) -> Optional[int]:
     if conc is None:
         return None
     for bp in breakpoints:
         val = linear_interpolate(conc, bp)
         if val is not None:
-            # round to nearest integer
             return int(round(val))
     # if above highest defined breakpoint, extrapolate using last interval
     if conc > breakpoints[-1][1]:
@@ -76,96 +59,151 @@ def get_subindex(conc: Optional[float], breakpoints: list) -> Optional[int]:
     return None
 
 
-async def fetch_city_latest(client: httpx.AsyncClient, city: str) -> Optional[Dict[str, Any]]:
-    """
-    Query OpenAQ latest endpoint for the city (country=IN).
-    Returns parsed JSON dict or None on error.
-    """
-    params = {"country": "IN", "city": city, "limit": 20}
+async def fetch_openaq(client: httpx.AsyncClient, endpoint: str, params: dict) -> Optional[Dict[str, Any]]:
     try:
-        resp = await client.get(OPENAQ_BASE, params=params, timeout=20.0)
+        resp = await client.get(f"{OPENAQ_BASE}/{endpoint}", params=params, timeout=20.0)
         resp.raise_for_status()
         return resp.json()
     except Exception:
         return None
 
 
-def extract_pm_values_from_openaq_payload(payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[str]]:
-    """
-    Given the OpenAQ 'latest' JSON, attempt to find PM2.5 and PM10 concentrations and a timestamp.
-    Returns (pm25, pm10, last_updated_iso)
-    - pm25/pm10 are floats or None
-    - last_updated_iso is ISO timestamp string or None
-    """
+def extract_from_latest(payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[str]]:
     if not payload:
         return None, None, None
-
     results = payload.get("results") or []
     if not results:
         return None, None, None
-
-    # We'll examine the first few locations for pm25/pm10 measurements and take the
-    # first available measurement for each pollutant (this is simple and deterministic).
     pm25 = None
     pm10 = None
     updated = None
-
+    # search through results and measurements to pick pm25 and pm10
     for res in results:
-        # 'measurements' is usually a list
         measurements = res.get("measurements") or []
         for m in measurements:
             param = (m.get("parameter") or "").lower()
-            # OpenAQ returns ISO timestamps in 'lastUpdated' or 'lastUpdated' key
-            t = m.get("lastUpdated") or m.get("last_updated") or m.get("lastUpdatedAt") or None
-            if param in ("pm25", "pm2.5") and pm25 is None:
-                # try float conversion
-                try:
-                    pm25 = float(m.get("value"))
-                    if not updated and t:
-                        updated = t
-                except Exception:
-                    pm25 = None
-            if param == "pm10" and pm10 is None:
-                try:
-                    pm10 = float(m.get("value"))
-                    if not updated and t:
-                        updated = t
-                except Exception:
-                    pm10 = None
-        # if we found both, break
+            val = m.get("value")
+            ts = m.get("lastUpdated") or m.get("last_updated") or m.get("lastUpdatedAt") or None
+            try:
+                v = float(val)
+            except Exception:
+                v = None
+            if param in ("pm25", "pm2.5") and pm25 is None and v is not None:
+                pm25 = v
+                if not updated and ts:
+                    updated = ts
+            if param == "pm10" and pm10 is None and v is not None:
+                pm10 = v
+                if not updated and ts:
+                    updated = ts
         if pm25 is not None and pm10 is not None:
             break
-
     return pm25, pm10, updated
 
 
+async def try_measurements_for_city(client: httpx.AsyncClient, city: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    # Try to fetch recent measurements (separate endpoint) for PM2.5 and PM10
+    pm25 = None
+    pm10 = None
+    updated = None
+    params = {"country": "IN", "city": city, "limit": 100, "sort": "desc", "parameter": "pm25,pm10"}
+    resp = await fetch_openaq(client, "measurements", params)
+    if resp:
+        results = resp.get("results") or []
+        for m in results:
+            p = (m.get("parameter") or "").lower()
+            try:
+                v = float(m.get("value"))
+            except Exception:
+                continue
+            ts = m.get("date", {}).get("utc") or m.get("date", {}).get("local") or m.get("date") or None
+            if p in ("pm25", "pm2.5") and pm25 is None:
+                pm25 = v
+                updated = updated or ts
+            if p == "pm10" and pm10 is None:
+                pm10 = v
+                updated = updated or ts
+            if pm25 is not None and pm10 is not None:
+                break
+    return pm25, pm10, updated
+
+
+async def find_locations_and_try(client: httpx.AsyncClient, city: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    # search locations with city in name (keyword)
+    params = {"country": "IN", "limit": 50, "sort": "desc", "city": city}
+    resp = await fetch_openaq(client, "locations", params)
+    if not resp:
+        return None, None, None
+    locations = resp.get("results") or []
+    for loc in locations:
+        location_name = loc.get("id") or loc.get("location")
+        # fetch measurements for this location
+        params2 = {"location_id": loc.get("id"), "limit": 20}
+        data = await fetch_openaq(client, "measurements", params2)
+        if data:
+            results = data.get("results") or []
+            pm25 = None
+            pm10 = None
+            updated = None
+            for m in results:
+                p = (m.get("parameter") or "").lower()
+                try:
+                    v = float(m.get("value"))
+                except Exception:
+                    continue
+                ts = m.get("date", {}).get("utc") or m.get("date", {}).get("local") or None
+                if p in ("pm25", "pm2.5") and pm25 is None:
+                    pm25 = v; updated = updated or ts
+                if p == "pm10" and pm10 is None:
+                    pm10 = v; updated = updated or ts
+                if pm25 is not None and pm10 is not None:
+                    return pm25, pm10, updated
+    return None, None, None
+
+
 @router.get("/top-cities")
-async def get_top_cities():
-    """
-    Basic placeholder: can be extended to compute top polluted cities from DB or OpenAQ.
-    For now, return a static list or instruct frontend to use /api/city/<city>.
-    """
-    sample = [
-        "Delhi", "Mumbai", "Kolkata", "Chennai", "Hyderabad"
-    ]
-    return {"cities": sample}
+async def top_cities():
+    return {"cities": ["Delhi", "Mumbai", "Kolkata", "Chennai", "Hyderabad"]}
 
 
 @router.get("/city/{city}")
-async def get_city(city: str):
-    """
-    Returns the latest PM2.5, PM10 and computed AQI for a given city (India).
-    Response:
-      {
-        "city": "Delhi",
-        "pm25": 85.2,
-        "pm10": 132.1,
-        "aqi": 167,
-        "subindex": {"pm25": 167, "pm10": 134},
-        "updated": "2025-12-01T14:20:00Z"
-      }
-    If no data available, returns 204 with a descriptive body.
-    """
-    city_query = city
+async def city_endpoint(city: str):
+    city_q = city
     async with httpx.AsyncClient() as client:
-        payload = await fetch_city_latest(client, city_query)
+        # 1) try latest endpoint
+        payload = await fetch_openaq(client, "latest", {"country": "IN", "city": city_q, "limit": 20})
+        pm25, pm10, updated = extract_from_latest(payload)
+        # 2) if empty, try measurements endpoint
+        if pm25 is None and pm10 is None:
+            pm25, pm10, updated = await try_measurements_for_city(client, city_q)
+        # 3) if still empty, search locations and try
+        if pm25 is None and pm10 is None:
+            pm25, pm10, updated = await find_locations_and_try(client, city_q)
+
+    # nothing found
+    if pm25 is None and pm10 is None:
+        # return 200 with message (frontend expects JSON)
+        return {"city": city, "message": "No measurements found for PM2.5 or PM10"}
+
+    sub_pm25 = get_subindex(pm25, PM25_BREAKPOINTS) if pm25 is not None else None
+    sub_pm10 = get_subindex(pm10, PM10_BREAKPOINTS) if pm10 is not None else None
+    candidates = [x for x in (sub_pm25, sub_pm10) if x is not None]
+    overall_aqi = max(candidates) if candidates else None
+
+    ts_iso = None
+    if updated:
+        try:
+            dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            ts_iso = dt.astimezone(timezone.utc).isoformat()
+        except Exception:
+            ts_iso = updated
+
+    return {
+        "city": city,
+        "pm25": None if pm25 is None else round(pm25, 2),
+        "pm10": None if pm10 is None else round(pm10, 2),
+        "aqi": overall_aqi,
+        "subindex": {"pm25": sub_pm25, "pm10": sub_pm10},
+        "updated": ts_iso,
+        "source": "openaq"
+    }
