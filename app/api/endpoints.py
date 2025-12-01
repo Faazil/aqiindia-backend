@@ -1,4 +1,5 @@
 # app/api/endpoints.py
+import os
 from fastapi import APIRouter, HTTPException
 import httpx
 from datetime import datetime, timezone
@@ -7,7 +8,7 @@ from typing import Optional, Dict, Any, Tuple, List
 router = APIRouter()
 
 OPENAQ_BASE = "https://api.openaq.org/v3"
-
+API_KEY = os.getenv("OPENAQ_API_KEY")
 PM25_BREAKPOINTS = [
     (0.0, 30.0, 0, 50),
     (30.0, 60.0, 51, 100),
@@ -60,11 +61,20 @@ def get_subindex(conc: Optional[float], breakpoints: List[Tuple[float, float, in
 
 
 async def fetch_openaq(client: httpx.AsyncClient, endpoint: str, params: dict) -> Optional[Dict[str, Any]]:
+    headers = {}
+    if API_KEY:
+        headers["X-API-Key"] = API_KEY
     try:
-        resp = await client.get(f"{OPENAQ_BASE}/{endpoint}", params=params, timeout=20.0)
+        url = f"{OPENAQ_BASE}/{endpoint}"
+        resp = await client.get(url, params=params, headers=headers, timeout=20.0)
         resp.raise_for_status()
         return resp.json()
-    except Exception:
+    except httpx.HTTPStatusError as he:
+        # non-2xx response; log details
+        print("fetch_openaq HTTP error:", he.response.status_code, he.response.text[:1000], "endpoint:", endpoint, "params:", params)
+        return None
+    except Exception as e:
+        print("fetch_openaq general error:", str(e), "endpoint:", endpoint, "params:", params)
         return None
 
 
