@@ -10,4 +10,6 @@ uvicorn
 python-multipart
 Flask
 flask-cors
+httpx>=0.24.0
+
 
