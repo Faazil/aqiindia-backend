@@ -1,8 +1,14 @@
-from fastapi import APIRouter, HTTPException
-from app.db import get_top_cities
-from typing import List
+# app/api/endpoints.py
+from fastapi import APIRouter
+
 router = APIRouter()
 
 @router.get("/top-cities")
-def top_cities(limit: int = 10):
-    return get_top_cities(limit=limit)
+def get_top_cities():
+    # your logic here
+    return {"result": "ok"}
+
+@router.get("/city/{city}")
+def get_city(city: str):
+    # your logic here
+    return {"city": city}
