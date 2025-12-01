@@ -1,18 +1,17 @@
 # app/main.py
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# import router from endpoints (must exist at app/api/endpoints.py)
 from app.api.endpoints import router as api_router
 
-# --- Create App ---
 app = FastAPI(
     title="AQI India Backend",
     description="Backend API for AQI India project",
     version="1.0.0"
 )
 
-# --- CORS CONFIG ---
-# Allow only your frontend domain (recommended)
+# Only allow your production frontend origin
 origins = [
     "https://aqiindia.live",
     "https://www.aqiindia.live",
@@ -20,16 +19,15 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,            # Only allow your domain
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],              # GET, POST, OPTIONS, PUT, DELETE
-    allow_headers=["*"],              # Content-Type, Authorization, etc.
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# --- Include API routes from app/api/endpoints.py ---
+# mount the API router at /api
 app.include_router(api_router, prefix="/api")
 
-# --- Root health check ---
 @app.get("/", tags=["Health"])
 def root():
     return {"status": "OK", "message": "AQI backend running"}
