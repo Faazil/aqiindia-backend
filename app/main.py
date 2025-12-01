@@ -1,9 +1,21 @@
+# app/main.py
 from fastapi import FastAPI
-from app.api.endpoints import router as api_router
-from app.api.ingest import start_scheduler, ingest_job
-app = FastAPI(title="AQI India API")
-app.include_router(api_router, prefix="/api")
+from fastapi.middleware.cors import CORSMiddleware
 
-@app.on_event("startup")
-async def startup_event():
-    start_scheduler()
+app = FastAPI()
+
+# Allow only your site (recommended)
+origins = [
+    "https://aqiindia.live",
+    "https://www.aqiindia.live",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET","POST","OPTIONS","PUT","DELETE"],
+    allow_headers=["*"],
+)
+
+# ... your existing routes below ...
