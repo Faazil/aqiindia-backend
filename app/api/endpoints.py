@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, Tuple, List
 
 router = APIRouter()
 
-OPENAQ_BASE = "https://api.openaq.org/v2"
+OPENAQ_BASE = "https://api.openaq.org/v3"
 
 PM25_BREAKPOINTS = [
     (0.0, 30.0, 0, 50),
